@@ -65,6 +65,7 @@ ${COMPILER}:
 # Rules for building the blinky example.
 #
 ${COMPILER}/blinky.axf: ${COMPILER}/blinky.o
+${COMPILER}/blinky.axf: ${COMPILER}/hiflash.o
 ${COMPILER}/blinky.axf: ${COMPILER}/startup_${COMPILER}.o
 ${COMPILER}/blinky.axf: ${ROOT}/driverlib/${COMPILER}/libdriver.a
 ${COMPILER}/blinky.axf: blinky.ld

@@ -61,7 +61,7 @@ SECTIONS
     .hitext :
     {
         _hitext = .;
-        *(.hitext)
+        *(.hiflash)
         _ehitext = .;
     } >HIFLASH AT>LOFLASH
 }
