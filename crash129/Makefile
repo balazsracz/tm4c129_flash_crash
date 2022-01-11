@@ -28,9 +28,14 @@
 PART=TM4C1294NCPDT
 
 #
-# The base directory for TivaWare.
+# The base directory for TivaWare. This is patched up in case the git folder is
+# symlinked into tivaware.
 #
+ifneq ("$(wildcard ../../../../makedefs)","")
 ROOT=../../../..
+else
+ROOT=$(shell dirname `pwd`)/../../..
+endif
 
 #
 # Include the common make definitions.
@@ -40,7 +45,10 @@ include ${ROOT}/makedefs
 #
 # Where to find header files that do not live in the source directory.
 #
-IPATH=../../../..
+IPATH=$(ROOT)
+
+# Where to find sources to compile.
+VPATH+=$(ROOT)/utils
 
 #
 # The default rule, which causes the blinky example to be built.
@@ -66,12 +74,13 @@ ${COMPILER}:
 #
 ${COMPILER}/blinky.axf: ${COMPILER}/blinky.o
 ${COMPILER}/blinky.axf: ${COMPILER}/hiflash.o
+${COMPILER}/blinky.axf: ${COMPILER}/uartstdio.o
 ${COMPILER}/blinky.axf: ${COMPILER}/startup_${COMPILER}.o
 ${COMPILER}/blinky.axf: ${ROOT}/driverlib/${COMPILER}/libdriver.a
 ${COMPILER}/blinky.axf: blinky.ld
 SCATTERgcc_blinky=blinky.ld
 ENTRY_blinky=ResetISR
-CFLAGSgcc=-DTARGET_IS_TM4C129_RA1 -g
+CFLAGSgcc=-DTARGET_IS_TM4C129_RA1 -g -ffunction-sections -fdata-sections
 LDFLAGSgcc_blinky=-Map=${COMPILER}/blinky.map -g
 
 %.lst: %.axf
