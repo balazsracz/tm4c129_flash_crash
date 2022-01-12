@@ -23,12 +23,14 @@
 //*****************************************************************************
 
 #define _POSIX_C_SOURCE 200112L
+#define DEBUG
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 #include "inc/hw_memmap.h"
+#include "inc/hw_ints.h"
 #include "driverlib/debug.h"
 #include "driverlib/gpio.h"
 #include "driverlib/sysctl.h"
@@ -37,6 +39,8 @@
 #include "driverlib/rom_map.h"
 #include "driverlib/flash.h"
 #include "driverlib/uart.h"
+#include "driverlib/timer.h"
+#include "driverlib/interrupt.h"
 #include "utils/uartstdio.h"
 
 //*****************************************************************************
@@ -107,6 +111,7 @@ void replicate_code(void)
   extern char _text, _ehitext;
   uint32_t ptr = (uint32_t)&_text;
   uint32_t end = (uint32_t)&_ehitext;
+  end -= 512 * 1024;
   uint32_t addr = ptr + 512 * 1024;
 
   if (memcmp((void*)ptr, (void*)addr, end-ptr) == 0) {
@@ -115,10 +120,12 @@ void replicate_code(void)
   }
 
   while(ptr < end) {
-      ASSERT(0 == ROM_FlashErase(ptr));
+      int ret = ROM_FlashErase(addr);
+      ASSERT(ret == 0);
       uint32_t len = end - ptr;
       if (len > 16*1024) len = 16*1024;
-      ASSERT(0 == ROM_FlashProgram((uint32_t*)ptr, addr, len));
+      ret = ROM_FlashProgram((uint32_t*)ptr, addr, len);
+      ASSERT(ret == 0);
       ptr += len;
       addr += len;
   }
@@ -194,6 +201,14 @@ void run_scenario(Scenario* s) {
     default:
       while(1);
   }
+
+  if (s->timer_enable) {
+    MAP_IntEnable(INT_TIMER0A);
+  }
+  if (s->int_nesting_enable) {
+    MAP_IntEnable(INT_TIMER0B);
+  }
+  
   
   (*erase)(flash_base);
   unsigned int seed = 42;
@@ -211,11 +226,65 @@ void run_scenario(Scenario* s) {
     }
     (*program)(data_write, addr, bytes);
   }
+
+  MAP_IntDisable(INT_TIMER0A);
+  MAP_IntDisable(INT_TIMER0B);
+  MAP_IntDisable(INT_TIMER1A);
+  MAP_IntDisable(INT_TIMER1B);
+
   
 }
 
+//*****************************************************************************
+//
+// Interrupts that will hit during flash operations.
+//
+//*****************************************************************************
+static unsigned counter = 0;
+static uint8_t display = 0;
+
+void Timer0AInterrupt(void) {
+  ROM_TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+  if (++counter > 5000) {
+    counter = 0;
+    display ^= 0xff;
+    ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, display);
+  }
+  ROM_IntPendSet(INT_TIMER0B);
+}
+
+void Timer0BInterrupt(void) {
+  ROM_IntPendClear(INT_TIMER0B);
+  ++counter;
+}
+
+void __attribute__((section(".hiflash"))) Timer1AInterrupt(void) {
+  ROM_TimerIntClear(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
+  if (++counter > 5000) {
+    counter = 0;
+    display ^= 0xff;
+    ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, display);
+  }
+  ROM_IntPendSet(INT_TIMER1B);
+}
+
+void __attribute__((section(".hiflash"))) Timer1BInterrupt(void) {
+  ROM_IntPendClear(INT_TIMER1B);
+  ++counter;
+}
+
+
 Scenario runs[] = {
+// num,int, nest, prog, write_high
+  {5, true, true, 1, false},
   {1, false, false, 0, true},
+  {2, true, true, 0, true},
+  {3, true, true, 1, true},
+  {4, true, true, 2, true},
+  {42, false, false, 2, true},
+  {41, true, false, 2, true},
+  {5, true, true, 1, false},
+  {6, true, true, 2, false},
   {0}
 };
 
@@ -272,6 +341,35 @@ main(void)
     GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_0);
     GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_1);
 
+    // Sets up interrupt timers.
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER1);
+
+    MAP_TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
+    MAP_TimerLoadSet(TIMER0_BASE, TIMER_A, g_ui32SysClock / 20000);
+
+    // This interrupt should hit even during kernel operations.
+    MAP_IntPrioritySet(INT_TIMER0A, 0);
+    MAP_IntPrioritySet(INT_TIMER0B, 0x20);
+    MAP_TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+    MAP_TimerEnable(TIMER0_BASE, TIMER_A);
+
+    MAP_TimerConfigure(TIMER1_BASE, TIMER_CFG_PERIODIC);
+    MAP_TimerLoadSet(TIMER1_BASE, TIMER_A, g_ui32SysClock / 20000);
+
+    // This interrupt should hit even during kernel operations.
+    MAP_IntPrioritySet(INT_TIMER1A, 0);
+    MAP_IntPrioritySet(INT_TIMER1B, 0x20);
+    MAP_TimerIntEnable(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
+    MAP_TimerEnable(TIMER1_BASE, TIMER_A);
+    
+    MAP_IntDisable(INT_TIMER0A);
+    MAP_IntDisable(INT_TIMER0B);
+    MAP_IntDisable(INT_TIMER1A);
+    MAP_IntDisable(INT_TIMER1B);
+    
+    
+    
     for (unsigned i = 0; runs[i].num; ++i) {
       UARTprintf("scenario %u: timer=%d nesting=%d flash=%s write=%s\n",
                  runs[i].num, runs[i].timer_enable, runs[i].int_nesting_enable,
