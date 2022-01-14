@@ -280,6 +280,96 @@ void run_scenario(Scenario* s) {
   
 }
 
+
+void print_scenario(Scenario* s) {
+      UARTprintf("scenario %u: timer=%d nesting=%d flash=%s write=%s int=%s vect=%s ",
+                 s->num, s->timer_enable, s->int_nesting_enable,
+                 flash_commands_to_str[s->flash_commands],
+                 s->write_to_high ? "high": "low",
+                 s->int_high ? "high": "low",
+                 vect_select_to_str[s->vect_select]);
+}
+
+/// Generates a scenario by going through all combinations seuquentially.
+/// @param num where are we in the sequence number
+/// @param s output argument: the generated scenario
+/// @return true if successful, false if num is too high.
+bool generate_scenario(unsigned num, Scenario* s)
+{
+  memset(s, 0, sizeof(*s));
+  s->num = num;
+
+#if 0  
+  // Check timer
+  switch(num%3) {
+    case 0:
+      s->timer_enable = 0;
+      s->int_nesting_enable = 0;
+      break;
+    case 1:
+      s->timer_enable = 1;
+      s->int_nesting_enable = 0;
+      break;
+    case 2:
+      s->timer_enable = 1;
+      s->int_nesting_enable = 1;
+      break;
+  }
+  num /= 3;
+#else
+  s->timer_enable = 1;
+  s->int_nesting_enable = 1;
+#endif  
+
+#if 1  
+  // Split on flash commands
+  s->flash_commands = (num % 3);
+  num /= 3;
+#else
+  s->flash_commands = 0; // ROM
+#endif 
+
+#if 1  
+  // Split on Writing to high flash or low flash
+  s->write_to_high = (num & 1) > 0;
+  num /= 2;
+#else
+  s->write_to_high = 1; // always write to high flash
+#endif
+  
+#if 1  
+  // Split on int high or low
+  s->int_high = (num & 1);
+  num /= 2;
+#else
+  s->int_high = 0; // always low interrupt
+#endif
+
+#if 1  
+  // Split on vector table select
+  s->vect_select = (num % 3);
+  num /= 3;
+#else
+  s->vect_select = 0; // default low vector table
+#endif 
+  
+  // If we have bits left, then the scenario number is too high.
+  return !(num > 0);
+}
+
+extern int blacklist[];
+
+/// Checks if a scenario is in the blacklist.
+/// @param num number of scenario
+/// @return true if this is blacklisted.
+bool is_blacklisted(unsigned num) {
+  unsigned idx;  
+  for (idx = 0; blacklist[idx] >=0 && blacklist[idx]!=(int)num; idx++)
+  {
+  }
+  return blacklist[idx]==(int)num;
+}
+
 //*****************************************************************************
 //
 // Interrupts that will hit during flash operations.
@@ -376,6 +466,14 @@ Scenario runs[] = {
   {5, true, true, 1, false},
   {6, true, true, 2, false},
   {0}
+};
+
+// Which generated scenarios should we skip because they crash. terminated with
+// -1.
+int blacklist[] = {
+  3,
+  27,
+  -1
 };
 
 unsigned button_nowait = 0;
@@ -491,16 +589,29 @@ main(void)
     
     hw_preinit();
     
-    for (unsigned i = 0; runs[i].num; ++i) {
-      UARTprintf("scenario %u: timer=%d nesting=%d flash=%s write=%s int=%s vect=%s ",
-                 runs[i].num, runs[i].timer_enable, runs[i].int_nesting_enable,
-                 flash_commands_to_str[runs[i].flash_commands],
-                 runs[i].write_to_high ? "high": "low",
-                 runs[i].int_high ? "high": "low",
-                 vect_select_to_str[runs[i].vect_select]);
-      totalcount = 0;
-      run_scenario(runs+i);
-      UARTprintf("count=%u\n", totalcount);
+    if (false) {
+      // Run static scenarios
+      for (unsigned i = 0; runs[i].num; ++i) {
+        totalcount = 0;
+        print_scenario(runs+i);
+        run_scenario(runs+i);
+        UARTprintf("count=%u\n", totalcount);
+      }
+    } else {
+      // Generate scenarios
+      unsigned num = 0;
+      Scenario s;
+      while (generate_scenario(num, &s)) {
+        totalcount = 0;
+        print_scenario(&s);
+        if (is_blacklisted(num)) {
+          UARTprintf("blacklisted!\n", totalcount);
+        } else {
+          run_scenario(&s);
+          UARTprintf("count=%u\n", totalcount);
+        }
+        num++;
+      }
     }
     
     UARTprintf("All Done!\n");
