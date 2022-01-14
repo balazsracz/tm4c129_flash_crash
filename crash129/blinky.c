@@ -243,7 +243,7 @@ void run_scenario(Scenario* s) {
 static unsigned counter = 0;
 static uint8_t display = 0;
 
-void Timer0AInterrupt(void) {
+void __attribute__((aligned(32),section(".ahead.0a"))) Timer0AInterrupt(void) {
   ROM_TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
   if (++counter > 5000) {
     counter = 0;
@@ -251,11 +251,21 @@ void Timer0AInterrupt(void) {
     ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, display);
   }
   ROM_IntPendSet(INT_TIMER0B);
+  __asm__ volatile("nop\n");
 }
 
-void Timer0BInterrupt(void) {
+void __attribute__((aligned(32),section(".ahead.0b"))) Timer0BInterrupt(void) {
   ROM_IntPendClear(INT_TIMER0B);
+  ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_2, 0xff);
+  for (int i = 1500; i; i--) {
+    __asm__ volatile(" " : : "r"(i));
+  }
+  ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_2, 0);
   ++counter;
+  __asm__ volatile("nop\n");
+  __asm__ volatile("nop\n nop\n");
+  __asm__ volatile("nop\n nop\n");
+  __asm__ volatile("nop\n");
 }
 
 void __attribute__((section(".hiflash"))) Timer1AInterrupt(void) {
@@ -276,11 +286,12 @@ void __attribute__((section(".hiflash"))) Timer1BInterrupt(void) {
 
 Scenario runs[] = {
 // num,int, nest, prog, write_high
-  {5, true, true, 1, false},
   {1, false, false, 0, true},
-  {2, true, true, 0, true},
+  {21, true, true, 0, true}, // crashes
+  {2, true, false, 0, true},
   {3, true, true, 1, true},
   {4, true, true, 2, true},
+  {5, true, true, 1, false},
   {42, false, false, 2, true},
   {41, true, false, 2, true},
   {5, true, true, 1, false},
@@ -288,6 +299,27 @@ Scenario runs[] = {
   {0}
 };
 
+unsigned button_nowait = 0;
+
+void hw_preinit(void)
+{
+    // If enabled, waits for a button press to start. THis is helpful to attach
+    // a debugger.
+#if 1
+    do
+    {
+      if (GPIOPinRead(GPIO_PORTJ_BASE, GPIO_PIN_0) == 0) {
+        button_nowait = 1;
+      }
+    } while (!button_nowait);
+#endif
+    //
+    // Delay for a bit.
+    //
+    for(unsigned ui32Loop = 0; ui32Loop < 200000; ui32Loop++)
+    {
+    }
+}
 
 //*****************************************************************************
 //
@@ -340,13 +372,23 @@ main(void)
     //
     GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_0);
     GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_1);
+    GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_2);
+    GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_3);
 
+    //
+    // Enable the GPIO input for the USR_SW1 button.
+    //
+    MAP_SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOJ);
+    MAP_GPIODirModeSet(GPIO_PORTJ_BASE, GPIO_PIN_0, GPIO_DIR_MODE_IN);
+    MAP_GPIOPadConfigSet(GPIO_PORTJ_BASE, GPIO_PIN_0, GPIO_STRENGTH_2MA,
+                         GPIO_PIN_TYPE_STD_WPU);
+    
     // Sets up interrupt timers.
     SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER1);
 
     MAP_TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
-    MAP_TimerLoadSet(TIMER0_BASE, TIMER_A, g_ui32SysClock / 20000);
+    MAP_TimerLoadSet(TIMER0_BASE, TIMER_A, g_ui32SysClock / 10000);
 
     // This interrupt should hit even during kernel operations.
     MAP_IntPrioritySet(INT_TIMER0A, 0);
@@ -355,7 +397,7 @@ main(void)
     MAP_TimerEnable(TIMER0_BASE, TIMER_A);
 
     MAP_TimerConfigure(TIMER1_BASE, TIMER_CFG_PERIODIC);
-    MAP_TimerLoadSet(TIMER1_BASE, TIMER_A, g_ui32SysClock / 20000);
+    MAP_TimerLoadSet(TIMER1_BASE, TIMER_A, g_ui32SysClock / 10000);
 
     // This interrupt should hit even during kernel operations.
     MAP_IntPrioritySet(INT_TIMER1A, 0);
@@ -368,7 +410,7 @@ main(void)
     MAP_IntDisable(INT_TIMER1A);
     MAP_IntDisable(INT_TIMER1B);
     
-    
+    hw_preinit();
     
     for (unsigned i = 0; runs[i].num; ++i) {
       UARTprintf("scenario %u: timer=%d nesting=%d flash=%s write=%s\n",

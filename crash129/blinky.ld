@@ -36,6 +36,7 @@ SECTIONS
     {
         _text = .;
         KEEP(*(.isr_vector))
+        KEEP(*(SORT(.ahead*)))
         *(.text*)
         *(.rodata*)
         _etext = .;
