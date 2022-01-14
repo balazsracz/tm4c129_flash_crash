@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include "inc/hw_memmap.h"
 #include "inc/hw_ints.h"
+#include "inc/hw_nvic.h"
+#include "inc/hw_types.h"
 #include "driverlib/debug.h"
 #include "driverlib/gpio.h"
 #include "driverlib/sysctl.h"
@@ -53,6 +55,8 @@
 //
 //*****************************************************************************
 
+// Vector table copy in RAM.
+uint32_t __attribute__((aligned(1024))) ram_vectors[256];
 
 //*****************************************************************************
 //
@@ -108,6 +112,9 @@ ConfigureUART(void)
 
 void replicate_code(void)
 {
+  // Copy interrupt vectors first
+  extern uint32_t g_pfnVectors[];
+  memcpy(ram_vectors, g_pfnVectors, sizeof(ram_vectors));
   extern char _text, _ehitext;
   uint32_t ptr = (uint32_t)&_text;
   uint32_t end = (uint32_t)&_ehitext;
@@ -133,7 +140,7 @@ void replicate_code(void)
 
 typedef struct Scenario {
   // Scenario number. 0 = EOF.
-  uint8_t num;
+  unsigned num;
   // If true, we are going to run the timer during the scenario. Otherwise only
   // the flash ops.
   bool timer_enable;
@@ -143,10 +150,17 @@ typedef struct Scenario {
   uint8_t flash_commands;
   // if true, we're writing to high flash, if false, we're writing to low flash
   bool write_to_high;
+  // 0: low-flash interrupt, 1: high-flash interrupts
+  uint8_t int_high;
+  // 0: low-flash vector table, 1: high-flash vector table, 2: sram vector table
+  uint8_t vect_select;
 } Scenario;
 
 const char* flash_commands_to_str[] = {
   "ROM", "Low", "High"
+};
+const char* vect_select_to_str[] = {
+  "Low", "High", "RAM"
 };
 
 // How many flash operations we should do during one scenario.
@@ -178,6 +192,7 @@ int32_t call_ROM_FlashErase(uint32_t ui32Address) {
 extern int32_t HI_FlashProgram(uint32_t *pui32Data, uint32_t ui32Address, uint32_t ui32Count);
 extern int32_t HI_FlashErase(uint32_t ui32Address);
 
+
 uint32_t data_write[64/4];
 
 void run_scenario(Scenario* s) {
@@ -199,16 +214,46 @@ void run_scenario(Scenario* s) {
       erase = &HI_FlashErase;
       break;
     default:
+      UARTprintf("error in flash_command config\n");
       while(1);
   }
 
-  if (s->timer_enable) {
-    MAP_IntEnable(INT_TIMER0A);
+  switch(s->int_high) {
+    case 0:
+      if (s->timer_enable) {
+        MAP_IntEnable(INT_TIMER0A);
+      }
+      if (s->int_nesting_enable) {
+        MAP_IntEnable(INT_TIMER0B);
+      }
+      break;
+    case 1:
+      if (s->timer_enable) {
+        MAP_IntEnable(INT_TIMER1A);
+      }
+      if (s->int_nesting_enable) {
+        MAP_IntEnable(INT_TIMER1B);
+      }
+      break;
+    default:
+      UARTprintf("error in int_high config\n");
+      while(1);
   }
-  if (s->int_nesting_enable) {
-    MAP_IntEnable(INT_TIMER0B);
+
+  switch(s->vect_select) {
+    case 0:
+      HWREG(NVIC_VTABLE) = 0;
+      break;
+    case 1:
+      HWREG(NVIC_VTABLE) = 512*1024;
+      break;
+    case 2:
+      HWREG(NVIC_VTABLE) = (uint32_t)&(ram_vectors[0]);
+      break;
+    default:
+      UARTprintf("error in vect_select config\n");
+      while(1);
   }
-  
   
   (*erase)(flash_base);
   unsigned int seed = 42;
@@ -242,14 +287,16 @@ void run_scenario(Scenario* s) {
 //*****************************************************************************
 static unsigned counter = 0;
 static uint8_t display = 0;
+static unsigned totalcount = 0;
 
 void __attribute__((aligned(32),section(".ahead.0a"))) Timer0AInterrupt(void) {
   ROM_TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
-  if (++counter > 5000) {
+  if (++counter > 2000) {
     counter = 0;
     display ^= 0xff;
     ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, display);
   }
+  ++totalcount;
   ROM_IntPendSet(INT_TIMER0B);
   __asm__ volatile("nop\n");
 }
@@ -264,13 +311,14 @@ void __attribute__((aligned(32),section(".ahead.0b"))) Timer0BInterrupt(void) {
   ++counter;
   __asm__ volatile("nop\n");
   __asm__ volatile("nop\n nop\n");
+  //__asm__ volatile("nop\n nop\n");
   __asm__ volatile("nop\n nop\n");
-  __asm__ volatile("nop\n");
 }
 
-void __attribute__((section(".hiflash"))) Timer1AInterrupt(void) {
+void __attribute__((aligned(32),section(".hiflash"))) Timer1AInterrupt(void) {
   ROM_TimerIntClear(TIMER1_BASE, TIMER_TIMA_TIMEOUT);
-  if (++counter > 5000) {
+  ++totalcount;
+  if (++counter > 2000) {
     counter = 0;
     display ^= 0xff;
     ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, display);
@@ -278,15 +326,46 @@ void __attribute__((section(".hiflash"))) Timer1AInterrupt(void) {
   ROM_IntPendSet(INT_TIMER1B);
 }
 
-void __attribute__((section(".hiflash"))) Timer1BInterrupt(void) {
+void __attribute__((aligned(32),section(".hiflash"))) Timer1BInterrupt(void) {
   ROM_IntPendClear(INT_TIMER1B);
+  ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_2, 0xff);
+  for (int i = 1500; i; i--) {
+    __asm__ volatile(" " : : "r"(i));
+  }
+  ROM_GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_2, 0);
   ++counter;
+  __asm__ volatile("nop\n");
+  __asm__ volatile("nop\n nop\n");
+  //__asm__ volatile("nop\n nop\n");
+  __asm__ volatile("nop\n nop\n");
 }
 
 
 Scenario runs[] = {
-// num,int, nest, prog, write_high
+// num,int, nest, prog, write_high, int_high
   {1, false, false, 0, true},
+  {2, false, false, 0, true, 1},
+  {51, true, true, 0, false, 1, 2}, // ?
+
+  {231, true, true, 0, true, 1, 2}, // ?
+  {241, true, true, 0, false, 1, 2}, // ?
+  {431, true, true, 1, false, 1, 2}, // ?
+  {441, true, true, 2, false, 1, 2}, // ?
+  {331, true, true, 1, true, 1, 2}, // ?
+  {341, true, true, 2, true, 1, 2}, // ?
+  
+  {211, true, true, 0, true, 1}, // works
+  {221, true, true, 0, false, 1}, // works
+  {411, true, true, 1, false, 1}, // works
+  {421, true, true, 2, false, 1}, // works
+  {311, true, true, 1, true, 1}, // works
+  {321, true, true, 2, true, 1}, // works
+
+  {22, true, true, 0, false}, // works
+  {41, true, true, 1, false}, // works
+  {42, true, true, 2, false}, // works
+  {31, true, true, 1, true}, // works
+  {32, true, true, 2, true}, // works
   {21, true, true, 0, true}, // crashes
   {2, true, false, 0, true},
   {3, true, true, 1, true},
@@ -413,11 +492,15 @@ main(void)
     hw_preinit();
     
     for (unsigned i = 0; runs[i].num; ++i) {
-      UARTprintf("scenario %u: timer=%d nesting=%d flash=%s write=%s\n",
+      UARTprintf("scenario %u: timer=%d nesting=%d flash=%s write=%s int=%s vect=%s ",
                  runs[i].num, runs[i].timer_enable, runs[i].int_nesting_enable,
                  flash_commands_to_str[runs[i].flash_commands],
-                 runs[i].write_to_high ? "high": "low");
+                 runs[i].write_to_high ? "high": "low",
+                 runs[i].int_high ? "high": "low",
+                 vect_select_to_str[runs[i].vect_select]);
+      totalcount = 0;
       run_scenario(runs+i);
+      UARTprintf("count=%u\n", totalcount);
     }
     
     UARTprintf("All Done!\n");
